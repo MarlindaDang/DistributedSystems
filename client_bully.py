@@ -1,144 +1,165 @@
 import socket
 import threading
-import uuid
-import random
 import time
+import random  # *NEU* Für die Rangzuweisung
 
 # --- Konfigurationsvariablen ---
 HEADER = 64
-TCP_PORT = random.randint(5000, 6000)
-BROADCAST_PORT = random.randint(6001, 7000)
+BROADCAST_PORT = 6001
 FORMAT = 'utf-8'
+DISCOVERY_MESSAGE = "DISCOVER_CHAT_SERVER"
 DISCONNECTED_MESSAGE = "!LEAVE"
-HEARTBEAT_INTERVAL = 5
-HEARTBEAT_TIMEOUT = 10
-coordinator = None
-server_id = str(uuid.uuid4())  # Eindeutige Server-ID
-global servers
-servers = []
+HEARTBEAT_INTERVAL = 5  # Sekunden
 
-udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-udp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-udp_server.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-udp_server.bind(("", BROADCAST_PORT))
+lamport_time = 0  # Logische Uhr des Clients
+coordinator = None  # *NEU* Aktueller Koordinator
+client_rank = random.randint(1, 100)  # *NEU* Zufälliger Rang des Clients für den Bully-Algorithmus
 
-tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-tcp_server.bind(("", TCP_PORT))
 
-clients = []
-heartbeat_tracker = {}
-
-# ----------------------- Server-Funktionen -----------------------
-
-def handle_client(conn, addr):
+def discover_servers():
     """
-    Verwaltet die Kommunikation mit einem einzelnen Chat-Client.
-    Unterstützt HEARTBEAT, ELECTION und COORDINATOR-Nachrichten.
+    Sucht alle Chat-Server im lokalen Netzwerk und gibt eine Liste mit deren Informationen zurück.
     """
-    global coordinator
-    print(f"[NEW CONNECTION] {addr} ist dem Chat beigetreten.")
-    clients.append(conn)
-    heartbeat_tracker[conn] = (0, time.time())
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    client_socket.settimeout(5)
 
-    connected = True
-    while connected:
-        try:
-            # Nachricht lesen
-            msg_length = conn.recv(HEADER).decode(FORMAT)
-            if msg_length:
-                msg_length = int(msg_length)
-                msg = conn.recv(msg_length).decode(FORMAT)
+    server_list = []
+    try:
+        for port in range(6001, 7001):
+            try:
+                client_socket.sendto(DISCOVERY_MESSAGE.encode(FORMAT), ("<broadcast>", port))
+            except Exception:
+                continue
 
-                if msg.startswith("HEARTBEAT"):
-                    _, lamport_time = msg.split("|")
-                    lamport_time = int(lamport_time)
-                    heartbeat_tracker[conn] = (lamport_time, time.time())
-                    print(f"[HEARTBEAT] {addr}: Logische Zeit = {lamport_time}")
+        print("[CLIENT] Chat-Server werden gesucht...")
 
-                elif msg.startswith("ELECTION"):
-                    sender_rank = int(msg.split("|")[1])
-                    if sender_rank < int(server_id.split('-')[0], 16):
-                        print(f"[ELECTION] Wahl-Nachricht von Server mit Rang {sender_rank} erhalten.")
-                        start_election()
+        while True:
+            try:
+                data, addr = client_socket.recvfrom(1024)
+                server_list.append(data.decode(FORMAT))
+            except socket.timeout:
+                break
+    finally:
+        client_socket.close()
 
-                elif msg.startswith("COORDINATOR"):
-                    coordinator = msg.split("|")[1]
-                    print(f"[NEW COORDINATOR] Neuer Koordinator: {coordinator}")
-
-                elif msg == DISCONNECTED_MESSAGE:
-                    connected = False
-                    print(f"[LEAVE] {addr} hat den Chat verlassen.")
-
-                else:
-                    print(f"[{addr}] {msg}")
-                    broadcast(f"[{addr}] {msg}".encode(FORMAT), conn)
-        except ConnectionResetError:
-            connected = False
-            print(f"[ERROR] Verbindung zu {addr} unterbrochen.")
-
-    conn.close()
-    if conn in clients:
-        clients.remove(conn)
-    if conn in heartbeat_tracker:
-        del heartbeat_tracker[conn]
-    print(f"[DISCONNECTED] {addr} Verbindung geschlossen.")
+    return server_list
 
 
-def broadcast(message, sender_conn):
-    for client in clients:
-        if client != sender_conn:
-            client.send(message)
+def send(msg, client):
+    """
+    Sendet eine Nachricht an den Chat-Server.
+    """
+    message = msg.encode(FORMAT)
+    msg_length = len(message)
+    send_length = str(msg_length).encode(FORMAT)
+    send_length += b' ' * (HEADER - len(send_length))
+    client.send(send_length)
+    client.send(message)
 
-def monitor_heartbeats():
+
+def receive_messages(client):
+    """
+    Empfängt Nachrichten vom Server und verarbeitet sie.
+    """
     global coordinator
     while True:
-        time.sleep(HEARTBEAT_INTERVAL)
-        if coordinator:
-            coordinator_conn = next((conn for conn in clients if conn.getpeername()[1] == int(coordinator)), None)
-            if coordinator_conn and time.time() - heartbeat_tracker.get(coordinator_conn, (0, 0))[1] > HEARTBEAT_TIMEOUT:
-                print(f"[COORDINATOR FAILURE] Koordinator {coordinator} nicht erreichbar.")
-                start_election()
-
-        current_time = time.time()
-        for conn, (last_lamport_time, last_time) in list(heartbeat_tracker.items()):
-            if current_time - last_time > HEARTBEAT_TIMEOUT:
-                print(f"[HEARTBEAT TIMEOUT] Verbindung zu {conn.getpeername()} abgebrochen.")
-                conn.close()
-                if conn in clients:
-                    clients.remove(conn)
-                del heartbeat_tracker[conn]
-
-
-def start_election():
-    global coordinator
-    print(f"[ELECTION] Server {server_id} startet eine Wahl.")
-    higher_servers = [s for s in servers if s > server_id]
-
-    if not higher_servers:
-        coordinator = server_id
-        print(f"[COORDINATOR] Server {server_id} ist der neue Koordinator.")
-        broadcast_coordinator()
-    else:
-        for server in higher_servers:
-            send_election_message(server)
-
-
-def send_election_message(target_server):
-    try:
-        print(f"[ELECTION MESSAGE] Nachricht an {target_server} gesendet.")
-    except Exception:
-        print(f"[ELECTION] Keine Antwort von Server {target_server}.")
-
-
-def broadcast_coordinator():
-    for server in servers:
         try:
-            print(f"[BROADCAST] Koordinator an {server} gesendet.")
+            message = client.recv(2048).decode(FORMAT)
+            print(f"\n{message}")
+
+            # *NEU* Verarbeitung von Wahl- und Koordinatornachrichten
+            if message.startswith("ELECTION"):
+                handle_election_message(message, client)
+            elif message.startswith("COORDINATOR"):
+                coordinator = message.split("|")[1]
+                print(f"[CLIENT] Neuer Koordinator ist: {coordinator}")
+        except OSError:
+            break
+
+
+def handle_election_message(message, client):  # *NEU*
+    """
+    Verarbeitet eine Wahl-Nachricht vom Server.
+    """
+    global client_rank
+    sender_rank = int(message.split("|")[1])
+    if client_rank > sender_rank:  # Falls der Client einen höheren Rang hat, sendet er zurück
+        print(f"[ELECTION] Client mit Rang {client_rank} reagiert auf Wahl.")
+        send(f"ELECTION|{client_rank}", client)
+    else:
+        print(f"[ELECTION] Client ignoriert Wahl von Rang {sender_rank}.")
+
+
+def send_heartbeat(client):
+    """
+    Sendet regelmäßig Heartbeat-Nachrichten mit logischem Timestamp an den Server.
+    """
+    global lamport_time
+    while True:
+        try:
+            lamport_time += 1  # Logische Uhr erhöhen
+            heartbeat_message = f"HEARTBEAT|{lamport_time}"
+            send(heartbeat_message, client)  # Heartbeat mit Lamport-Timestamp senden
+            time.sleep(HEARTBEAT_INTERVAL)
         except Exception:
-            print(f"[COORDINATOR] Server {server} konnte nicht erreicht werden.")
+            print("[CLIENT] Verbindung verloren.")
+            break
+
+
+def main():
+    """
+    Hauptfunktion des Clients.
+    """
+    global coordinator
+
+    server_list = discover_servers()
+    if not server_list:
+        print("[CLIENT] Keine Chat-Server gefunden. Beende Client.")
+        return
+
+    print("\nGefundene Server:")
+    for idx, server_info in enumerate(server_list, start=1):
+        print(f"{idx}. {server_info}")
+
+    choice = int(input("Wählen Sie einen Server aus (Nummer eingeben): ")) - 1
+    selected_server = server_list[choice]
+
+    server_details = selected_server.split(",")
+    server_ip = server_details[1].split(":")[1]
+    server_port = int(server_details[2].split(":")[1])
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.settimeout(10)
+
+    try:
+        client.connect((server_ip, server_port))
+        print(f"[CLIENT] Mit dem Chat-Server verbunden: {server_ip}:{server_port}")
+    except (ConnectionRefusedError, socket.timeout):
+        print("[CLIENT] Verbindung zum Server fehlgeschlagen.")
+        return
+
+    # *NEU* Initialisierung des Koordinators
+    coordinator = f"{server_ip}:{server_port}"
+    print(f"[CLIENT] Aktueller Koordinator: {coordinator}")
+
+    threading.Thread(target=receive_messages, args=(client,), daemon=True).start()
+    threading.Thread(target=send_heartbeat, args=(client,), daemon=True).start()
+
+    print("Du bist dem Chat beigetreten. Gib '!LEAVE' ein, um den Chat zu verlassen.")
+    while True:
+        message = input("Deine Nachricht: ")
+        try:
+            send(message, client)
+        except BrokenPipeError:
+            print("[CLIENT] Verbindung zum Server verloren.")
+            break
+        if message == DISCONNECTED_MESSAGE:
+            print("[CLIENT] Verlasse den Chat.")
+            break
+
+    client.close()
+
 
 if __name__ == "__main__":
-    print(f"[STARTING] Server {server_id} wird gestartet.")
-    servers.append(server_id)
-    threading.Thread(target=monitor_heartbeats, daemon=True).start()
-    print("Server ready.")
+    main()

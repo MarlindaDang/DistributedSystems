@@ -12,9 +12,11 @@ FORMAT = 'utf-8'
 DISCONNECTED_MESSAGE = "!LEAVE"
 HEARTBEAT_INTERVAL = 5
 HEARTBEAT_TIMEOUT = 10
-coordinator = None 
-server_rank = int(server_id.split('-')[0], 16)  
-servers = [] 
+
+server_id = str(uuid.uuid4())
+server_rank = random.randint(1, 100)  # Zufälliger Rang des Servers
+coordinator = None  # Aktueller Koordinator
+servers = []  # Liste aller bekannten Serververbindungen
 
 udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -26,7 +28,6 @@ tcp_server.bind(("", TCP_PORT))
 
 clients = []
 heartbeat_tracker = {}
-server_id = str(uuid.uuid4())
 
 
 def handle_client(conn, addr):
@@ -54,15 +55,15 @@ def handle_client(conn, addr):
                     heartbeat_tracker[conn] = (lamport_time, time.time())
                     print(f"[HEARTBEAT] {addr}: Logische Zeit = {lamport_time}")
 
-                elif msg.startswith("ELECTION"):  # *NEU*
-                    sender_rank = int(msg.split("|")[1])  # *NEU* Extrahiere den Rang des sendenden Servers
-                    if sender_rank < server_rank:  # *NEU* Starte Wahl, wenn der eigene Rang höher ist
-                        print(f"[ELECTION] Wahl-Nachricht von Server mit Rang {sender_rank} erhalten.")  # *NEU*
-                        start_election()  # *NEU*
+                elif msg.startswith("ELECTION"):
+                    sender_rank = int(msg.split("|")[1])
+                    if sender_rank < server_rank:
+                        print(f"[ELECTION] Wahl-Nachricht von Server mit Rang {sender_rank} erhalten.")
+                        start_election()
 
-                elif msg.startswith("COORDINATOR"):  # *NEU*
-                    coordinator = msg.split("|")[1]  # *NEU* Aktualisiere den globalen Koordinator
-                    print(f"[NEW COORDINATOR] Neuer Koordinator: {coordinator}")  # *NEU*
+                elif msg.startswith("COORDINATOR"):
+                    coordinator = msg.split("|")[1]
+                    print(f"[NEW COORDINATOR] Neuer Koordinator: {coordinator}")
 
                 elif msg == DISCONNECTED_MESSAGE:
                     connected = False
@@ -73,7 +74,6 @@ def handle_client(conn, addr):
                     broadcast(f"[{addr}] {msg}".encode(FORMAT), conn)
         except ConnectionResetError:
             connected = False
-            print(f"[ERROR] Verbindung zu {addr} unterbrochen.")
 
     conn.close()
     if conn in clients:
@@ -83,15 +83,16 @@ def handle_client(conn, addr):
     print(f"[DISCONNECTED] {addr} Verbindung geschlossen.")
 
 
-
-
 def broadcast(message, sender_conn):
     """
     Sendet eine Nachricht an alle verbundenen Clients außer dem Absender.
     """
     for client in clients:
         if client != sender_conn:
-            client.send(message)
+            try:
+                client.send(message)
+            except Exception:
+                clients.remove(client)
 
 
 def monitor_heartbeats():
@@ -101,16 +102,15 @@ def monitor_heartbeats():
     global coordinator
     while True:
         time.sleep(HEARTBEAT_INTERVAL)
-        if coordinator:  # *NEU* Prüft, ob ein Koordinator existiert
-            if time.time() - heartbeat_tracker.get(coordinator, (0, 0))[1] > HEARTBEAT_TIMEOUT:  # *NEU*
-                print(f"[COORDINATOR FAILURE] Koordinator {coordinator} nicht erreichbar.")  # *NEU*
-                start_election()  # *NEU* Starte eine Wahl, da der Koordinator ausgefallen ist
+        if coordinator and not any(conn == coordinator for conn in clients):
+            print(f"[COORDINATOR FAILURE] Koordinator {coordinator} nicht erreichbar.")
+            start_election()
 
         # Überprüfe Heartbeats anderer Verbindungen
         current_time = time.time()
         for conn, (last_lamport_time, last_time) in list(heartbeat_tracker.items()):
             if current_time - last_time > HEARTBEAT_TIMEOUT:
-                print(f"[HEARTBEAT TIMEOUT] Verbindung zu {conn.getpeername()} abgebrochen.")  # *NEU*
+                print(f"[HEARTBEAT TIMEOUT] Verbindung zu {conn.getpeername()} abgebrochen.")
                 conn.close()
                 if conn in clients:
                     clients.remove(conn)
@@ -142,13 +142,14 @@ def start_tcp_server():
         thread.start()
         print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
 
+
 def start_election():
     """
     Initiiert eine Wahl nach dem Bully-Algorithmus.
     """
     global coordinator
     print(f"[ELECTION] Server {server_id} startet eine Wahl.")
-    higher_servers = [s for s in servers if s > server_rank]
+    higher_servers = [s for s in servers if s[1] > server_rank]
 
     if not higher_servers:
         coordinator = server_id
@@ -158,27 +159,32 @@ def start_election():
         for server in higher_servers:
             send_election_message(server)
 
+
 def send_election_message(target_server):
     """
     Sendet eine Wahl-Nachricht an einen anderen Server.
     """
     try:
-        # Beispielcode für Senden über TCP-Verbindung
-        target_server.send(f"ELECTION|{server_rank}".encode(FORMAT))  # *NEU*
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((target_server[0], target_server[2]))
+            s.send(f"ELECTION|{server_rank}".encode(FORMAT))
     except Exception:
-        print(f"[ELECTION] Keine Antwort von Server {target_server}.")  # *NEU*
+        print(f"[ELECTION] Keine Antwort von Server {target_server[0]}.")
+
 
 def broadcast_coordinator():
     """
     Informiert alle Server über den neuen Koordinator.
     """
-    for server in servers:  # *NEU*
+    for server in servers:
         try:
-            # Beispielcode für TCP-Broadcast
-            server.send(f"COORDINATOR|{server_id}".encode(FORMAT))  # *NEU*
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((server[0], server[2]))
+                s.send(f"COORDINATOR|{server_id}".encode(FORMAT))
         except Exception:
-            print(f"[COORDINATOR] Server {server} konnte nicht erreicht werden.")  # *NEU*
-            
+            print(f"[COORDINATOR] Server {server[0]} konnte nicht erreicht werden.")
+
+
 if __name__ == "__main__":
     print(f"[STARTING] Chat-Server wird gestartet... Server-ID: {server_id}")
     print(f"[SERVER INFO] TCP-Port: {TCP_PORT}, Broadcast-Port: {BROADCAST_PORT}")
