@@ -81,11 +81,6 @@ def discover_servers():
                     servers[decoded_data] = addr
                     print(f"[SERVER] Neuer Server entdeckt: {decoded_data}")
 
-                    # Sende aktuelle Koordinator-Informationen an den neuen Server
-                    if coordinator:
-                        coord_message = f"COORDINATOR|{coordinator}"
-                        udp_server.sendto(coord_message.encode(FORMAT), addr)
-                        print(f"[COORDINATOR INFO] Koordinator-Info an {addr} gesendet: {coord_message}")
 
             except socket.timeout:
                 break
@@ -102,6 +97,7 @@ def discover_servers():
 
 
 def listen_for_multicast(message, addr):
+    global election_in_progress, new_coordinator, coordinator
     """
     Verarbeitung eingehender Nachrichten, inklusive Wahl- und Koordinator-Nachrichten.
     """
@@ -116,19 +112,34 @@ def listen_for_multicast(message, addr):
         heartbeat_tracker[addr] = (0, time.time())
 
     elif message.startswith("ELECTION"):
+        election_in_progress = True
+        print("Election in progress")
         sender_rank = int(message.split('|')[1])
         print(f"[ELECTION] Wahl-Nachricht von Server mit Rang {sender_rank} erhalten.")
 
         if sender_rank < server_rank:
             print(f"[ELECTION] Server mit Rang {server_rank} übernimmt die Wahl.")
+            udp_server.sendto(f"Rang hoeher".encode(FORMAT), addr)
             start_election()
         elif sender_rank > server_rank:
+            print(f"Serverrank: {server_rank}")
+            print(f"SenderranK: {sender_rank}")
             print(f"[ELECTION] Server mit Rang {sender_rank} akzeptiert. Stoppe lokale Wahl.")
             return
 
     elif message.startswith("COORDINATOR"):
         coordinator_msg = message.split('|')[1]
-        print(f"[COORDINATOR] Neuer Koordinator: {coordinator_msg}")
+        print(f"[COORDINATOR] Neuer Koordinator, welcher die Wahl gewonnen hat: {coordinator_msg}")
+        election_in_progress = False
+    
+    elif message.startswith("Rang"):
+        print("Wahl verloren")
+        new_coordinator = False
+        coordinator = False
+        time.sleep(20)
+        main()
+
+
 
 
 
@@ -199,7 +210,7 @@ def handle_server():
                 if msg_utf.startswith("HEARTBEAT"):
                     _, lamport_time = msg_utf.split("|")
                     lamport_time = int(lamport_time)
-                    heartbeat_tracker_server[msg_length] = (lamport_time, time.time())
+                    heartbeat_tracker[msg_length] = (lamport_time, time.time())
                     print(f"[HEARTBEAT] {msg_length}: Logische Zeit = {lamport_time}")
                 else:
                     print("Keine Heartbeat Message")
@@ -282,6 +293,7 @@ def send_heartbeat():
     Nur der Koordinator sendet regelmäßig Heartbeat-Nachrichten an alle bekannten Server.
     """
     while True:
+        discover_servers()
         time.sleep(HEARTBEAT_INTERVAL)
         if coordinator:  # Nur senden, wenn dieser Server der Koordinator ist
             for server in servers.values():
@@ -307,7 +319,7 @@ def monitor_heartbeats_clients():
         # Überprüfe Heartbeats anderer Verbindungen
         """
         current_time = time.time()
-        for conn, (last_lamport_time, last_time) in list(heartbeat_tracker_clients.items()):
+        for conn, (last_lamport_time, last_time) in list(heartbeat_tracker_client.items()):
             if current_time - last_time > HEARTBEAT_TIMEOUT:
                 print(f"[HEARTBEAT TIMEOUT] Verbindung zu Koordinator abgebrochen. Starte nun Election")  # *NEU*
                 conn.close()
@@ -358,6 +370,12 @@ def monitor_heartbeats():
             if current_time - last_time > HEARTBEAT_TIMEOUT:
                 print(f"[HEARTBEAT TIMEOUT] Verbindung zu {addr} abgebrochen.")
                 del heartbeat_tracker[addr]
+                key_to_delete = None
+                for key,value in servers.items():
+                    if value == addr:
+                        key_to_delete = key
+                if key_to_delete:
+                    del servers[key_to_delete]
 
                 # Starte Wahl nur, wenn keine läuft
                 if not election_in_progress:
@@ -460,7 +478,8 @@ def start_election():
     """
     Initiiert eine Wahl nach dem Bully-Algorithmus.
     """
-    global coordinator
+    global coordinator,new_coordinator
+    new_coordinator = True
     print(f"[ELECTION] Server mit Rang {server_rank} startet eine Wahl.")
 
     higher_servers = []
@@ -475,6 +494,15 @@ def start_election():
         except Exception as e:
             print(f"[ERROR] Fehler beim Senden der Wahl-Nachricht: {e}")
 
+    time.sleep(10)
+    if new_coordinator == True:
+        election_in_progress = False
+        multicast_coordinator()
+
+
+
+
+"""
     # Warte auf Antworten höherrangiger Server
     if higher_servers:
         time.sleep(10)  # Wartezeit auf Reaktion höherrangiger Server
@@ -486,19 +514,24 @@ def start_election():
     coordinator_id = server_id
     #print(f"[COORDINATOR] Server mit Rang {server_rank} ist jetzt Koordinator.")
     multicast_coordinator() 
-
+"""
 def multicast_coordinator():
     """
     Sendet eine Nachricht, um den neuen Koordinator bekanntzugeben.
     """
+    global coordinator
     print(f"[COORDINATOR] Bekanntgabe: Server mit Rang {server_rank} ist neuer Koordinator.")
     for server in servers.values():
         try:
-            server_ip, server_port = filter_server_ip_port(server)
+            #server_ip, server_port = filter_server_ip_port(server)
+            server_ip, server_port = server
             message = f"COORDINATOR|{server_id}"
             udp_server.sendto(message.encode(FORMAT), (server_ip, server_port))
         except Exception as e:
             print(f"[ERROR] Fehler beim Senden der Koordinator-Nachricht: {e}")
+    coordinator = True
+    main()
+    
 
       
 def main():
@@ -506,6 +539,8 @@ def main():
     print(f"[STARTING] Chat-Server wird gestartet... Server-ID: {server_id}")
     print(f"[SERVER INFO] TCP-Port: {TCP_PORT}, Broadcast-Port: {BROADCAST_PORT}")
     print(f"[USP] Server lauscht auf {udp_server}")
+    print("STARTE MAIN")
+    global election_in_progress
     election_in_progress = False
 
     # Starte den Listener-Thread
@@ -521,7 +556,7 @@ def main():
     #heartbeat_monitor_thread.start()
 
     # Starte den Wahl-Thread, falls nötig
-    if not coordinator:
+    if True:
         
         listing = discover_servers()
         if not listing or coordinator:  # Falls discover_servers keine Server gefunden hat
