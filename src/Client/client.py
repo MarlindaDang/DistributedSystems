@@ -22,11 +22,11 @@ def discover_servers():
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    client_socket.settimeout(5)
+    client_socket.settimeout(15)
 
     server_list = []
     try:
-        for port in range(6001, 7001):
+        for port in range(6001, 7000):
             try:
                 client_socket.sendto(DISCOVERY_MESSAGE.encode(FORMAT), ("<broadcast>", port))
             except Exception:
