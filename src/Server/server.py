@@ -101,10 +101,17 @@ def listen_for_multicast(message, addr):
     """
     Verarbeitung eingehender Nachrichten, inklusive Wahl- und Koordinator-Nachrichten.
     """
+
     if message.startswith("DISCOVER_SERVER"):
         response = f"SERVER_ID:{server_id},SERVER_IP:{addr[0]},PORT:{BROADCAST_PORT}"
         udp_server.sendto(response.encode(FORMAT), addr)
         print(f"[BROADCAST RESPONSE] Antwort {response} gesendet an {addr}")
+
+    elif message.startswith("DISCOVER_CHAT_SERVER"):
+        response = f"SERVER_ID:{server_id},SERVER_IP:{socket.gethostbyname(socket.gethostname())},PORT:{TCP_PORT}"
+        udp_server.sendto(response.encode(FORMAT), addr)
+        print(f"[BROADCAST RESPONSE] Antwort gesendet an {addr}")
+    
 
     elif message.startswith("HEARTBEAT"):
         print(f"[HEARTBEAT] Empfangen von {addr}")
@@ -166,6 +173,7 @@ def handle_client(conn, addr):
                     lamport_time = int(lamport_time)
                     heartbeat_tracker[conn] = (lamport_time, time.time())
                     print(f"[HEARTBEAT] {addr}: Logische Zeit = {lamport_time}")
+                
 
                 elif msg.startswith("ELECTION"):  # *NEU*
                     sender_rank = int(msg.split("|")[1])  # *NEU* Extrahiere den Rang des sendenden Servers
